@@ -2,3 +2,4 @@
 *.pdx.zip
 upload/
 .DS_Store
+prioritize_project.sh
