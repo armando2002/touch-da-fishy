@@ -1,0 +1,4 @@
+*.pdx/
+*.pdx.zip
+upload/
+.DS_Store

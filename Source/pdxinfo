@@ -1,0 +1,7 @@
+name=Touch Da Fishy
+author=OpenAI
+description=Crank to boop the fish.
+bundleID=com.openai.touchdafishy
+imagePath=
+version=1.0.0
+buildNumber=1

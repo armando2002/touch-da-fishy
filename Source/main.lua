@@ -1,0 +1,587 @@
+import "CoreLibs/graphics"
+import "CoreLibs/ui"
+import "CoreLibs/crank"
+import "CoreLibs/timer"
+
+local gfx = playdate.graphics
+local ui = playdate.ui
+local timer = playdate.timer
+local datastore = playdate.datastore
+
+playdate.display.setRefreshRate(30)
+math.randomseed(playdate.getSecondsSinceEpoch())
+
+-- =========================================================
+-- Constants / tuning
+-- =========================================================
+
+local SCREEN_W = 400
+local SCREEN_H = 240
+
+local STATE_TITLE = "title"
+local STATE_PLAY = "play"
+local STATE_GAMEOVER = "gameover"
+
+-- Paw / reach behavior. The crank is the star: it extends the paw.
+local ARM_BASE_X = 30
+local ARM_MIN_LENGTH = 26
+local ARM_MAX_LENGTH = 275
+local ARM_RETRACT_PER_FRAME = 1.2
+local ARM_CRANK_MULTIPLIER = 3.0
+local ARM_MOVE_SPEED = 4
+local PAW_RADIUS = 10
+
+-- Fish behavior
+local FISH_W = 34
+local FISH_H = 18
+local FISH_BASE_SPEED = 2.0
+local FISH_SCORE_SPEED_BONUS = 0.2
+local FISH_MISS_SPEED_BONUS = 0.1
+
+-- Win / lose state
+local MAX_MISSES = 3
+local TOUCH_BANNER_FRAMES = 22
+local MISS_FLASH_FRAMES = 20
+local FISH_TOUCHED_FRAMES = 12
+
+-- Crank motion needed to count as an intentional "touch"
+local TOUCH_CRANK_THRESHOLD = 0.6
+local TOUCH_ENERGY_THRESHOLD = 4.2
+
+local SAVE_KEY = "touch_da_fishy"
+
+-- =========================================================
+-- Mutable game state
+-- =========================================================
+
+local gameState = STATE_TITLE
+
+local score = 0
+local highScore = 0
+local misses = 0
+
+local touchBannerFrames = 0
+local missFlashFrames = 0
+local crankHintFrames = 0
+local titlePulseFrames = 0
+
+local arm = {
+    y = 122,
+    length = ARM_MIN_LENGTH,
+    lastCrankChange = 0,
+    crankEnergy = 0,
+}
+
+local fish = {
+    x = SCREEN_W + 20,
+    y = 150,
+    speed = FISH_BASE_SPEED,
+    bobPhase = 0,
+    bobAmplitude = 3,
+    touchedFrames = 0,
+}
+
+-- Pre-rendered title art based on the source meme, converted to 1-bit.
+local titleBackground = gfx.image.new("title_background")
+
+-- =========================================================
+-- Helpers
+-- =========================================================
+
+local function clamp(value, minValue, maxValue)
+    if value < minValue then
+        return minValue
+    elseif value > maxValue then
+        return maxValue
+    end
+    return value
+end
+
+local function getFishDrawY()
+    return fish.y + math.sin(fish.bobPhase) * fish.bobAmplitude
+end
+
+local function getPawPosition()
+    return ARM_BASE_X + arm.length, arm.y
+end
+
+-- Circle-vs-rectangle overlap is enough for the paw and fish hitbox.
+local function circleRectOverlap(cx, cy, radius, rx, ry, rw, rh)
+    local closestX = clamp(cx, rx, rx + rw)
+    local closestY = clamp(cy, ry, ry + rh)
+    local dx = cx - closestX
+    local dy = cy - closestY
+    return (dx * dx + dy * dy) <= (radius * radius)
+end
+
+local function drawPanel(x, y, w, h, radius)
+    gfx.setColor(gfx.kColorBlack)
+    gfx.fillRoundRect(x, y, w, h, radius)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawRoundRect(x + 3, y + 3, w - 6, h - 6, math.max(2, radius - 2))
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawSpeechBubble(x, y, w, h)
+    gfx.fillRoundRect(x, y, w, h, 8)
+    gfx.fillTriangle(x + 30, y + h - 2, x + 52, y + h - 2, x + 42, y + h + 12)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawRoundRect(x + 3, y + 3, w - 6, h - 6, 6)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawHalftoneDots(x, y, count)
+    for i = 0, count - 1 do
+        local r = 3 + (i % 2)
+        gfx.drawCircleAtPoint(x, y + (i * 26), r)
+    end
+end
+
+-- =========================================================
+-- Persistence
+-- =========================================================
+
+local function loadHighScore()
+    local data = datastore.read(SAVE_KEY)
+    if data ~= nil and data.highScore ~= nil then
+        highScore = data.highScore
+    end
+end
+
+local function saveHighScore()
+    datastore.write({ highScore = highScore }, SAVE_KEY)
+end
+
+local function updateHighScoreIfNeeded()
+    if score > highScore then
+        highScore = score
+        saveHighScore()
+    end
+end
+
+-- =========================================================
+-- Setup / reset
+-- =========================================================
+
+local function showCrankHint(frames)
+    crankHintFrames = frames
+    ui.crankIndicator:resetAnimation()
+    ui.crankIndicator.clockwise = true
+end
+
+local function spawnFish()
+    fish.x = SCREEN_W + math.random(10, 60)
+    fish.y = math.random(120, 174)
+    fish.speed = FISH_BASE_SPEED + (score * FISH_SCORE_SPEED_BONUS) + (misses * FISH_MISS_SPEED_BONUS)
+    fish.bobPhase = math.random() * math.pi * 2
+    fish.bobAmplitude = math.random(1, 4)
+    fish.touchedFrames = 0
+end
+
+local function resetArm()
+    arm.y = 124
+    arm.length = ARM_MIN_LENGTH
+    arm.lastCrankChange = 0
+    arm.crankEnergy = 0
+end
+
+local function startRun()
+    score = 0
+    misses = 0
+    touchBannerFrames = 0
+    missFlashFrames = 0
+
+    resetArm()
+    spawnFish()
+    showCrankHint(75)
+
+    gameState = STATE_PLAY
+end
+
+-- =========================================================
+-- Game events
+-- =========================================================
+
+local function handleTouchSuccess()
+    score = score + 1
+    updateHighScoreIfNeeded()
+
+    touchBannerFrames = TOUCH_BANNER_FRAMES
+    fish.touchedFrames = FISH_TOUCHED_FRAMES
+
+    -- Pull the paw back slightly after a successful boop so the
+    -- player has to crank again for the next fish.
+    arm.length = clamp(arm.length - 10, ARM_MIN_LENGTH, ARM_MAX_LENGTH)
+
+    spawnFish()
+end
+
+local function handleFishEscape()
+    misses = misses + 1
+    missFlashFrames = MISS_FLASH_FRAMES
+    arm.length = ARM_MIN_LENGTH
+
+    if misses >= MAX_MISSES then
+        updateHighScoreIfNeeded()
+        gameState = STATE_GAMEOVER
+    else
+        spawnFish()
+    end
+end
+
+-- =========================================================
+-- Update logic
+-- =========================================================
+
+local function updateAim()
+    if playdate.buttonIsPressed(playdate.kButtonUp) then
+        arm.y = arm.y - ARM_MOVE_SPEED
+    end
+    if playdate.buttonIsPressed(playdate.kButtonDown) then
+        arm.y = arm.y + ARM_MOVE_SPEED
+    end
+
+    -- Keep the paw inside the bowl area so the playfield mirrors the title art.
+    arm.y = clamp(arm.y, 96, 180)
+end
+
+local function updateArmFromCrank()
+    local crankChange = 0
+    local acceleratedChange = 0
+
+    if playdate.isCrankDocked() then
+        showCrankHint(1)
+    else
+        crankChange, acceleratedChange = playdate.getCrankChange()
+        arm.length = arm.length + (crankChange * ARM_CRANK_MULTIPLIER)
+    end
+
+    -- The paw slowly retracts every frame so the crank remains the
+    -- centerpiece of the interaction.
+    arm.length = arm.length - ARM_RETRACT_PER_FRAME
+    arm.length = clamp(arm.length, ARM_MIN_LENGTH, ARM_MAX_LENGTH)
+
+    -- Blend in a little motion history so fast crank bursts still count
+    -- even if a single frame's delta is small.
+    arm.crankEnergy = arm.crankEnergy * 0.82 + math.abs(acceleratedChange) * 0.18
+    arm.lastCrankChange = crankChange
+end
+
+local function updateFish()
+    fish.x = fish.x - fish.speed
+    fish.bobPhase = fish.bobPhase + 0.12
+
+    if fish.x + FISH_W < 0 then
+        handleFishEscape()
+    end
+end
+
+local function canTouchFish()
+    return arm.lastCrankChange > TOUCH_CRANK_THRESHOLD or arm.crankEnergy > TOUCH_ENERGY_THRESHOLD
+end
+
+local function checkTouch()
+    if not canTouchFish() then
+        return
+    end
+
+    local pawX, pawY = getPawPosition()
+    local fishY = getFishDrawY()
+
+    local fishRectX = fish.x
+    local fishRectY = fishY - (FISH_H / 2)
+
+    if circleRectOverlap(pawX, pawY, PAW_RADIUS, fishRectX, fishRectY, FISH_W, FISH_H) then
+        handleTouchSuccess()
+    end
+end
+
+local function updateFrameCounters()
+    if touchBannerFrames > 0 then
+        touchBannerFrames = touchBannerFrames - 1
+    end
+    if missFlashFrames > 0 then
+        missFlashFrames = missFlashFrames - 1
+    end
+    if crankHintFrames > 0 then
+        crankHintFrames = crankHintFrames - 1
+    end
+    if fish.touchedFrames > 0 then
+        fish.touchedFrames = fish.touchedFrames - 1
+    end
+    titlePulseFrames = (titlePulseFrames + 1) % 60
+end
+
+local function updatePlayState()
+    updateAim()
+    updateArmFromCrank()
+    updateFish()
+    checkTouch()
+    updateFrameCounters()
+end
+
+-- =========================================================
+-- Drawing
+-- =========================================================
+
+local function drawCountertop()
+    gfx.fillRect(0, 200, SCREEN_W, 40)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    for x = 10, SCREEN_W, 26 do
+        gfx.drawLine(x, 212, x + 10, 230)
+    end
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawSidePlate()
+    gfx.setColor(gfx.kColorBlack)
+    gfx.fillEllipseInRect(278, 72, 96, 48)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.fillEllipseInRect(284, 78, 84, 36)
+    gfx.drawCircleAtPoint(324, 96, 3)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawBowl()
+    -- Outer bowl rim
+    gfx.fillEllipseInRect(40, 112, 280, 112)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.fillEllipseInRect(52, 122, 256, 88)
+
+    -- Dark broth / shadow band inside the bowl.
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+    gfx.fillEllipseInRect(70, 146, 220, 48)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    for x = 104, 244, 36 do
+        gfx.drawLine(x, 162, x + 14, 148)
+        gfx.drawLine(x + 5, 170, x + 19, 156)
+    end
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawFish(fishX, fishY, isTouched)
+    local bodyW = FISH_W - 10
+    local bodyH = FISH_H
+    local bodyX = fishX + 8
+    local bodyY = fishY - bodyH / 2
+    local tailX = fishX
+    local tailMidY = fishY
+
+    if isTouched then
+        gfx.fillEllipseInRect(bodyX, bodyY - 2, bodyW, bodyH + 4)
+        gfx.fillTriangle(tailX + 10, tailMidY, tailX, tailMidY - 9, tailX, tailMidY + 9)
+        gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+        gfx.fillCircleAtPoint(bodyX + bodyW - 8, fishY - 2, 2)
+        gfx.setImageDrawMode(gfx.kDrawModeCopy)
+    else
+        gfx.fillEllipseInRect(bodyX, bodyY, bodyW, bodyH)
+        gfx.fillTriangle(tailX + 10, tailMidY, tailX, tailMidY - 8, tailX, tailMidY + 8)
+        gfx.setColor(gfx.kColorWhite)
+        gfx.fillCircleAtPoint(bodyX + bodyW - 8, fishY - 2, 2)
+        gfx.setColor(gfx.kColorBlack)
+        gfx.fillCircleAtPoint(bodyX + bodyW - 8, fishY - 2, 1)
+    end
+
+    -- Accent lines for fins so it echoes the sketched title art.
+    gfx.drawLine(bodyX + 5, fishY + 2, bodyX + 15, fishY + 6)
+    gfx.drawLine(bodyX + 5, fishY - 2, bodyX + 15, fishY - 6)
+end
+
+local function drawPaw()
+    local pawX, pawY = getPawPosition()
+
+    -- Arm / foreleg reaching toward the fish.
+    gfx.setLineWidth(10)
+    gfx.drawLine(ARM_BASE_X, arm.y, pawX - 6, pawY)
+    gfx.setLineWidth(2)
+    gfx.drawLine(ARM_BASE_X - 2, arm.y - 7, pawX - 9, pawY - 7)
+    gfx.drawLine(ARM_BASE_X - 2, arm.y + 7, pawX - 9, pawY + 7)
+    gfx.setLineWidth(1)
+
+    -- Main paw pad
+    gfx.fillCircleAtPoint(pawX, pawY, PAW_RADIUS)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.fillCircleAtPoint(pawX - 1, pawY + 3, 4)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+
+    -- Toes / claws
+    gfx.fillCircleAtPoint(pawX - 8, pawY - 8, 4)
+    gfx.fillCircleAtPoint(pawX - 1, pawY - 11, 4)
+    gfx.fillCircleAtPoint(pawX + 7, pawY - 8, 4)
+    gfx.drawLine(pawX - 7, pawY - 14, pawX - 10, pawY - 18)
+    gfx.drawLine(pawX, pawY - 16, pawX - 1, pawY - 20)
+    gfx.drawLine(pawX + 7, pawY - 14, pawX + 10, pawY - 18)
+end
+
+local function drawHUD()
+    drawPanel(10, 8, 108, 28, 8)
+    drawPanel(126, 8, 100, 28, 8)
+    drawPanel(234, 8, 124, 28, 8)
+
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawText("SCORE " .. tostring(score), 22, 15)
+    gfx.drawText("BEST " .. tostring(highScore), 138, 15)
+    gfx.drawText("MISSES " .. tostring(misses) .. "/" .. tostring(MAX_MISSES), 246, 15)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+
+    drawPanel(12, 206, 198, 24, 8)
+    drawPanel(218, 206, 170, 24, 8)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawText("CRANK = REACH / BOOP", 24, 212)
+    gfx.drawText("UP/DOWN = AIM", 234, 212)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawTouchBanner()
+    if touchBannerFrames <= 0 then
+        return
+    end
+
+    drawSpeechBubble(120, 48, 162, 32)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawTextAligned("TOUCHED DA FISHY!", 201, 57, kTextAlignment.center)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawPlayLogo()
+    drawPanel(16, 42, 166, 52, 10)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawTextAligned("TOUCH DA", 99, 54, kTextAlignment.center)
+    gfx.drawTextAligned("FISHY", 99, 70, kTextAlignment.center)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+    drawHalftoneDots(24, 66, 3)
+end
+
+local function drawPlayfield()
+    local invertScreen = missFlashFrames > 0
+
+    if titleBackground ~= nil then
+        titleBackground:draw(0, 0)
+        -- White wash over the title art so gameplay elements remain legible
+        -- while still feeling like the same scene.
+        gfx.setColor(gfx.kColorWhite)
+        gfx.fillRect(0, 0, SCREEN_W, SCREEN_H)
+        gfx.setColor(gfx.kColorBlack)
+    else
+        gfx.clear(gfx.kColorWhite)
+    end
+
+    if invertScreen then
+        gfx.fillRect(0, 0, SCREEN_W, SCREEN_H)
+        gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    end
+
+    drawCountertop()
+    drawSidePlate()
+    drawBowl()
+    drawPlayLogo()
+    drawPaw()
+    drawFish(fish.x, getFishDrawY(), fish.touchedFrames > 0)
+    drawHUD()
+    drawTouchBanner()
+
+    if crankHintFrames > 0 or playdate.isCrankDocked() then
+        ui.crankIndicator:draw(346, 44)
+    end
+
+    if invertScreen then
+        gfx.setImageDrawMode(gfx.kDrawModeCopy)
+    end
+end
+
+local function drawTitleOverlay()
+    drawPanel(18, 10, 180, 78, 10)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawTextAligned("TOUCH DA", 108, 24, kTextAlignment.center)
+    gfx.drawTextAligned("FISHY", 108, 46, kTextAlignment.center)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+
+    drawPanel(220, 12, 162, 52, 8)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawText("MEME MODE", 248, 20)
+    gfx.drawText("CRANK TO BOOP", 234, 38)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+
+    drawPanel(76, 188, 248, 26, 8)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    if titlePulseFrames < 30 then
+        gfx.drawTextAligned("PRESS A TO START", 200, 195, kTextAlignment.center)
+    else
+        gfx.drawTextAligned("BOOP FISH WITH CRANK", 200, 195, kTextAlignment.center)
+    end
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+
+    drawHalftoneDots(24, 58, 3)
+end
+
+local function drawTitleScreen()
+    if titleBackground ~= nil then
+        titleBackground:draw(0, 0)
+    else
+        gfx.clear(gfx.kColorWhite)
+    end
+
+    drawTitleOverlay()
+    ui.crankIndicator:draw(344, 78)
+end
+
+local function drawGameOverScreen()
+    if titleBackground ~= nil then
+        titleBackground:draw(0, 0)
+        gfx.setColor(gfx.kColorWhite)
+        gfx.fillRect(0, 0, SCREEN_W, SCREEN_H)
+        gfx.setColor(gfx.kColorBlack)
+    end
+
+    drawPanel(52, 34, 296, 160, 12)
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.drawTextAligned("FISHY GOT AWAY", 200, 56, kTextAlignment.center)
+    gfx.drawTextAligned("FINAL SCORE " .. tostring(score), 200, 102, kTextAlignment.center)
+    gfx.drawTextAligned("BEST SCORE " .. tostring(highScore), 200, 122, kTextAlignment.center)
+    gfx.drawTextAligned("PRESS A TO PLAY AGAIN", 200, 156, kTextAlignment.center)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+    drawHalftoneDots(80, 80, 3)
+end
+
+-- =========================================================
+-- Playdate callbacks
+-- =========================================================
+
+function playdate.update()
+    gfx.clear(gfx.kColorWhite)
+
+    if gameState == STATE_TITLE then
+        if playdate.buttonJustPressed(playdate.kButtonA) then
+            startRun()
+        end
+        updateFrameCounters()
+        drawTitleScreen()
+
+    elseif gameState == STATE_PLAY then
+        updatePlayState()
+        drawPlayfield()
+
+    elseif gameState == STATE_GAMEOVER then
+        if playdate.buttonJustPressed(playdate.kButtonA) then
+            startRun()
+        end
+        updateFrameCounters()
+        drawGameOverScreen()
+    end
+
+    timer.updateTimers()
+end
+
+function playdate.crankDocked()
+    if gameState == STATE_PLAY then
+        showCrankHint(90)
+    else
+        showCrankHint(45)
+    end
+end
+
+function playdate.crankUndocked()
+    showCrankHint(45)
+end
+
+loadHighScore()
