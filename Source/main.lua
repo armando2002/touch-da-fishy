@@ -32,11 +32,11 @@ local ARM_MOVE_SPEED = 4
 local PAW_RADIUS = 10
 
 -- Fish behavior
-local FISH_W = 34
-local FISH_H = 18
-local FISH_BASE_SPEED = 2.0
-local FISH_SCORE_SPEED_BONUS = 0.2
-local FISH_MISS_SPEED_BONUS = 0.1
+local FISH_W = 62
+local FISH_H = 32
+local FISH_BASE_SPEED = 1.5
+local FISH_SCORE_SPEED_BONUS = 0.12
+local FISH_MISS_SPEED_BONUS = 0.08
 
 -- Win / lose state
 local MAX_MISSES = 3
@@ -171,10 +171,10 @@ end
 
 local function spawnFish()
     fish.x = SCREEN_W + math.random(10, 60)
-    fish.y = math.random(120, 174)
+    fish.y = math.random(140, 178)
     fish.speed = FISH_BASE_SPEED + (score * FISH_SCORE_SPEED_BONUS) + (misses * FISH_MISS_SPEED_BONUS)
     fish.bobPhase = math.random() * math.pi * 2
-    fish.bobAmplitude = math.random(1, 4)
+    fish.bobAmplitude = math.random(3, 7)
     fish.touchedFrames = 0
 end
 
@@ -334,57 +334,86 @@ local function drawCountertop()
 end
 
 local function drawSidePlate()
-    gfx.setColor(gfx.kColorBlack)
-    gfx.fillEllipseInRect(278, 72, 96, 48)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.fillEllipseInRect(284, 78, 84, 36)
-    gfx.drawCircleAtPoint(324, 96, 3)
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+    -- Removed for v0.2 fish readability pass.
+    -- The upper-right plate competed visually with the fish target.
 end
 
 local function drawBowl()
-    -- Outer bowl rim
-    gfx.fillEllipseInRect(40, 112, 280, 112)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.fillEllipseInRect(52, 122, 256, 88)
+    -- Large readable bowl outline instead of one solid black blob.
+    -- This keeps the gameplay area grounded without competing with the fish.
+    local bowlX = 40
+    local bowlY = 112
+    local bowlW = 280
+    local bowlH = 112
 
-    -- Dark broth / shadow band inside the bowl.
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
-    gfx.fillEllipseInRect(70, 146, 220, 48)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    for x = 104, 244, 36 do
-        gfx.drawLine(x, 162, x + 14, 148)
-        gfx.drawLine(x + 5, 170, x + 19, 156)
+    gfx.setColor(gfx.kColorBlack)
+
+    -- Outer rim
+    gfx.setLineWidth(3)
+    gfx.drawEllipseInRect(bowlX, bowlY, bowlW, bowlH)
+
+    -- Inner water/broth boundary
+    gfx.setLineWidth(2)
+    gfx.drawEllipseInRect(bowlX + 14, bowlY + 14, bowlW - 28, bowlH - 34)
+
+    gfx.setLineWidth(1)
+
+    -- A few simple dark broth marks, not a giant filled blob.
+    for x = 96, 246, 38 do
+        gfx.drawLine(x, 166, x + 16, 154)
+        gfx.drawLine(x + 5, 176, x + 20, 162)
     end
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
 end
 
 local function drawFish(fishX, fishY, isTouched)
-    local bodyW = FISH_W - 10
+    local bodyX = fishX + 14
+    local bodyY = fishY - FISH_H / 2
+    local bodyW = FISH_W - 20
     local bodyH = FISH_H
-    local bodyX = fishX + 8
-    local bodyY = fishY - bodyH / 2
     local tailX = fishX
     local tailMidY = fishY
 
+    gfx.setColor(gfx.kColorBlack)
+
+    -- Big readable tail.
+    gfx.fillTriangle(
+        tailX + 18, tailMidY,
+        tailX, tailMidY - 14,
+        tailX, tailMidY + 14
+    )
+
+    -- Bold body silhouette.
+    gfx.fillEllipseInRect(bodyX, bodyY, bodyW, bodyH)
+
+    -- White eye patch for contrast.
+    gfx.setColor(gfx.kColorWhite)
+    gfx.fillCircleAtPoint(bodyX + bodyW - 10, fishY - 6, 7)
+
+    -- Black pupil.
+    gfx.setColor(gfx.kColorBlack)
+    gfx.fillCircleAtPoint(bodyX + bodyW - 9, fishY - 6, 3)
+
+    -- Mouth / startled expression.
+    gfx.drawLine(bodyX + bodyW - 3, fishY + 5, bodyX + bodyW + 5, fishY + 2)
+
+    -- White highlight cut into the body so it does not read as a plain blob.
+    gfx.setColor(gfx.kColorWhite)
+    gfx.drawLine(bodyX + 10, fishY - 7, bodyX + 26, fishY - 11)
+    gfx.drawLine(bodyX + 9, fishY + 7, bodyX + 28, fishY + 12)
+
+    -- Black fin accents.
+    gfx.setColor(gfx.kColorBlack)
+    gfx.drawLine(bodyX + 16, fishY - 2, bodyX + 28, fishY - 11)
+    gfx.drawLine(bodyX + 16, fishY + 2, bodyX + 28, fishY + 11)
+
     if isTouched then
-        gfx.fillEllipseInRect(bodyX, bodyY - 2, bodyW, bodyH + 4)
-        gfx.fillTriangle(tailX + 10, tailMidY, tailX, tailMidY - 9, tailX, tailMidY + 9)
-        gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-        gfx.fillCircleAtPoint(bodyX + bodyW - 8, fishY - 2, 2)
-        gfx.setImageDrawMode(gfx.kDrawModeCopy)
-    else
-        gfx.fillEllipseInRect(bodyX, bodyY, bodyW, bodyH)
-        gfx.fillTriangle(tailX + 10, tailMidY, tailX, tailMidY - 8, tailX, tailMidY + 8)
-        gfx.setColor(gfx.kColorWhite)
-        gfx.fillCircleAtPoint(bodyX + bodyW - 8, fishY - 2, 2)
-        gfx.setColor(gfx.kColorBlack)
-        gfx.fillCircleAtPoint(bodyX + bodyW - 8, fishY - 2, 1)
+        -- Shock marks when booped.
+        gfx.drawLine(bodyX + bodyW + 6, fishY - 14, bodyX + bodyW + 15, fishY - 22)
+        gfx.drawLine(bodyX + bodyW + 8, fishY, bodyX + bodyW + 20, fishY)
+        gfx.drawLine(bodyX + bodyW + 6, fishY + 14, bodyX + bodyW + 15, fishY + 22)
     end
 
-    -- Accent lines for fins so it echoes the sketched title art.
-    gfx.drawLine(bodyX + 5, fishY + 2, bodyX + 15, fishY + 6)
-    gfx.drawLine(bodyX + 5, fishY - 2, bodyX + 15, fishY - 6)
+    gfx.setColor(gfx.kColorBlack)
 end
 
 local function drawPaw()
