@@ -21,6 +21,10 @@ local SCREEN_H = 240
 local STATE_TITLE = "title"
 local STATE_PLAY = "play"
 local STATE_GAMEOVER = "gameover"
+local FISH_IDLE = "idle"
+local FISH_TENSE = "tense"
+local FISH_FLOP = "flop"
+local FISH_RECOVER = "recover"
 
 -- Paw / reach behavior. The crank is the star: it extends the paw.
 local ARM_BASE_X = 30
@@ -29,7 +33,7 @@ local ARM_MAX_LENGTH = 275
 local ARM_RETRACT_PER_FRAME = 0.55
 local ARM_CRANK_MULTIPLIER = 1.8
 local ARM_MOVE_SPEED = 4
-local PAW_RADIUS = 13
+local PAW_RADIUS = 6
 
 -- Fish behavior
 local FISH_W = 62
@@ -37,12 +41,15 @@ local FISH_H = 32
 local FISH_BASE_SPEED = 1.5
 local FISH_SCORE_SPEED_BONUS = 0.12
 local FISH_MISS_SPEED_BONUS = 0.08
+local FISH_ESCAPE_FRAMES = 150
+local RESPAWN_DELAY_FRAMES = 24
 
 -- Win / lose state
 local MAX_MISSES = 3
 local TOUCH_BANNER_FRAMES = 22
 local MISS_FLASH_FRAMES = 20
 local FISH_TOUCHED_FRAMES = 12
+local TOUCH_COOLDOWN_FRAMES = 15
 
 -- Crank motion needed to count as an intentional "touch"
 local TOUCH_CRANK_THRESHOLD = 0.6
@@ -63,6 +70,8 @@ local misses = 0
 local touchBannerFrames = 0
 local missFlashFrames = 0
 local crankHintFrames = 0
+local escapeBannerFrames = 0
+local respawnDelayFrames = 0
 local titlePulseFrames = 0
 
 local arm = {
@@ -82,6 +91,10 @@ local fish = {
     bobAmplitude = 3,
     flopTimer = 0,
     touchedFrames = 0,
+    state = FISH_IDLE,
+    stateFrames = 0,
+    touchCooldownFrames = 0,
+    escapeFrames = FISH_ESCAPE_FRAMES,
     
 }
 
@@ -183,15 +196,19 @@ end
 
 local function spawnFish()
     fish.x = math.random(170, 255)
-    fish.y = math.random(108, 184)
+    fish.y = math.random(138, 170)
     fish.targetX = fish.x
     fish.targetY = fish.y
     fish.speed = FISH_BASE_SPEED
     fish.bobPhase = math.random() * math.pi * 2
     fish.bobAmplitude = math.random(2, 4)
-    fish.flopTimer = math.random(45, 90)
+    fish.flopTimer = math.random(35, 70)
     fish.flopFrames = 0
+    fish.state = FISH_IDLE
+    fish.stateFrames = math.random(25, 50)
     fish.touchedFrames = 0
+    fish.touchCooldownFrames = TOUCH_COOLDOWN_FRAMES
+    fish.escapeFrames = FISH_ESCAPE_FRAMES
 end
 
 local function resetArm()
@@ -206,6 +223,8 @@ local function startRun()
     misses = 0
     touchBannerFrames = 0
     missFlashFrames = 0
+    escapeBannerFrames = 0
+    respawnDelayFrames = 0
 
     resetArm()
     spawnFish()
@@ -232,16 +251,17 @@ local function handleTouchSuccess()
     spawnFish()
 end
 
-local function handleFishEscape()
+    local function handleFishEscape()
     misses = misses + 1
     missFlashFrames = MISS_FLASH_FRAMES
     arm.length = ARM_MIN_LENGTH
+    escapeBannerFrames = 28
 
     if misses >= MAX_MISSES then
         updateHighScoreIfNeeded()
         gameState = STATE_GAMEOVER
     else
-        spawnFish()
+        respawnDelayFrames = RESPAWN_DELAY_FRAMES
     end
 end
 
@@ -283,26 +303,77 @@ local function updateArmFromCrank()
     arm.lastCrankChange = crankChange
 end
 
-local function updateFish()
-    fish.bobPhase = fish.bobPhase + 0.16
+local function updateFishIdle()
+    if fish.stateFrames <= 0 then
+        fish.state = FISH_TENSE
+        fish.stateFrames = math.random(5, 10)
+    end
+end
 
-    if fish.flopFrames > 0 then
-        fish.flopFrames = fish.flopFrames - 1
+local function getFishTargetYAwayFromPaw()
+    local targetY = math.random(86, 194)
 
-        fish.x = fish.x + (fish.targetX - fish.x) * 0.50
-        fish.y = fish.y + (fish.targetY - fish.y) * 0.50
-    else
-        fish.flopTimer = fish.flopTimer - 1
-
-        if fish.flopTimer <= 0 then
-            fish.targetX = math.random(155, 285)
-            fish.targetY = math.random(96, 190)
-            fish.flopFrames = math.random(4, 7)
-            fish.flopTimer = math.random(18, 36)
-            if math.random(1, 100) <= 20 then
-            fish.flopTimer = math.random(4, 10)
-            end
+    if math.abs(targetY - arm.y) < 28 then
+        if arm.y < 140 then
+            targetY = math.random(160, 194)
+        else
+            targetY = math.random(86, 120)
         end
+    end
+
+    return targetY
+end
+
+local function updateFishTense()
+    if fish.stateFrames <= 0 then
+        fish.targetX = math.random(155, 285)
+        fish.targetY = getFishTargetYAwayFromPaw()
+
+        fish.state = FISH_FLOP
+        fish.stateFrames = math.random(4, 7)
+    end
+end
+
+local function updateFishFlop()
+    fish.x = fish.x + (fish.targetX - fish.x) * 0.62
+    fish.y = fish.y + (fish.targetY - fish.y) * 0.62
+
+    if fish.stateFrames <= 0 then
+        fish.state = FISH_RECOVER
+        fish.stateFrames = math.random(8, 16)
+    end
+end
+
+local function updateFishRecover()
+    if fish.stateFrames <= 0 then
+        fish.state = FISH_IDLE
+        fish.stateFrames = math.random(18, 42)
+    end
+end
+
+local function updateFish()
+    fish.bobPhase = fish.bobPhase + 0.18
+    fish.stateFrames = fish.stateFrames - 1
+
+    -- Fish escapes if ignored too long.
+    fish.escapeFrames = fish.escapeFrames - 1
+
+    if fish.escapeFrames <= 0 then
+        handleFishEscape()
+        return
+    end
+
+    if fish.state == FISH_IDLE then
+        updateFishIdle()
+
+    elseif fish.state == FISH_TENSE then
+        updateFishTense()
+
+    elseif fish.state == FISH_FLOP then
+        updateFishFlop()
+
+    elseif fish.state == FISH_RECOVER then
+        updateFishRecover()
     end
 end
 
@@ -311,6 +382,10 @@ local function canTouchFish()
 end
 
 local function checkTouch()
+    if fish.touchCooldownFrames > 0 then
+        return
+    end
+
     if not canTouchFish() then
         return
     end
@@ -318,10 +393,15 @@ local function checkTouch()
     local pawX, pawY = getPawPosition()
     local fishY = getFishDrawY()
 
-    local fishRectX = fish.x
-    local fishRectY = fishY - (FISH_H / 2)
+    local fishCenterX = fish.x + (FISH_W / 2)
+    local fishCenterY = fishY
 
-    if circleRectOverlap(pawX, pawY, PAW_RADIUS, fishRectX, fishRectY, FISH_W, FISH_H) then
+    local dx = math.abs(pawX - fishCenterX)
+    local dy = math.abs(pawY - fishCenterY)
+
+    -- Require both reach timing and vertical aim.
+    -- This makes sitting still and cranking unreliable.
+    if dx <= 18 and dy <= 8 then
         handleTouchSuccess()
     end
 end
@@ -330,19 +410,42 @@ local function updateFrameCounters()
     if touchBannerFrames > 0 then
         touchBannerFrames = touchBannerFrames - 1
     end
+
     if missFlashFrames > 0 then
         missFlashFrames = missFlashFrames - 1
     end
+
     if crankHintFrames > 0 then
         crankHintFrames = crankHintFrames - 1
     end
+
     if fish.touchedFrames > 0 then
         fish.touchedFrames = fish.touchedFrames - 1
     end
+
+    if fish.touchCooldownFrames > 0 then
+        fish.touchCooldownFrames = fish.touchCooldownFrames - 1
+    end
+
+    if escapeBannerFrames > 0 then
+        escapeBannerFrames = escapeBannerFrames - 1
+    end
+
     titlePulseFrames = (titlePulseFrames + 1) % 60
 end
 
 local function updatePlayState()
+    if respawnDelayFrames > 0 then
+        respawnDelayFrames = respawnDelayFrames - 1
+
+        if respawnDelayFrames == 0 then
+            spawnFish()
+        end
+
+        updateFrameCounters()
+        return
+    end
+
     updateAim()
     updateArmFromCrank()
     updateFish()
@@ -472,6 +575,19 @@ local function drawPaw()
     gfx.drawLine(pawX + 7, pawY - 14, pawX + 10, pawY - 18)
 end
 
+local function drawEscapeTimer()
+    local barX = 92
+    local barY = 190
+    local barW = 216
+    local barH = 6
+
+    local ratio = clamp(fish.escapeFrames / FISH_ESCAPE_FRAMES, 0, 1)
+    local fillW = math.floor(barW * ratio)
+
+    gfx.drawRect(barX, barY, barW, barH)
+    gfx.fillRect(barX, barY, fillW, barH)
+end
+
 local function drawHUD()
     drawPanel(10, 8, 108, 28, 8)
     drawPanel(126, 8, 100, 28, 8)
@@ -499,6 +615,25 @@ local function drawTouchBanner()
     drawSpeechBubble(120, 48, 162, 32)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
     gfx.drawTextAligned("TOUCHED DA FISHY!", 201, 57, kTextAlignment.center)
+    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+local function drawEscapeBanner()
+    if escapeBannerFrames <= 0 then
+        return
+    end
+
+    drawSpeechBubble(114, 48, 174, 32)
+
+    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+
+    gfx.drawTextAligned(
+        "FISH GOT AWAY!",
+        201,
+        57,
+        kTextAlignment.center
+    )
+
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
 end
 
@@ -535,9 +670,14 @@ local function drawPlayfield()
     drawBowl()
     --drawPlayLogo()
     drawPaw()
-    drawFish(fish.x, getFishDrawY(), fish.touchedFrames > 0)
+
+    if respawnDelayFrames <= 0 then
+        drawFish(fish.x, getFishDrawY(), fish.touchedFrames > 0)
+    end
     drawHUD()
+    drawEscapeTimer()
     drawTouchBanner()
+    drawEscapeBanner()
 
     if crankHintFrames > 0 or playdate.isCrankDocked() then
         ui.crankIndicator:draw(346, 44)
