@@ -26,10 +26,10 @@ local STATE_GAMEOVER = "gameover"
 local ARM_BASE_X = 30
 local ARM_MIN_LENGTH = 26
 local ARM_MAX_LENGTH = 275
-local ARM_RETRACT_PER_FRAME = 1.2
-local ARM_CRANK_MULTIPLIER = 3.0
+local ARM_RETRACT_PER_FRAME = 0.55
+local ARM_CRANK_MULTIPLIER = 1.8
 local ARM_MOVE_SPEED = 4
-local PAW_RADIUS = 10
+local PAW_RADIUS = 13
 
 -- Fish behavior
 local FISH_W = 62
