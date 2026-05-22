@@ -106,7 +106,7 @@ local function getFishDrawY()
 
     if fish.flopFrames > 0 then
         local flopProgress = fish.flopFrames / 14
-        local bounce = math.sin(flopProgress * math.pi) * 10
+        local bounce = math.sin(flopProgress * math.pi) * 14
         return fish.y - bounce + idleWiggle
     end
 
@@ -289,16 +289,19 @@ local function updateFish()
     if fish.flopFrames > 0 then
         fish.flopFrames = fish.flopFrames - 1
 
-        fish.x = fish.x + (fish.targetX - fish.x) * 0.34
-        fish.y = fish.y + (fish.targetY - fish.y) * 0.34
+        fish.x = fish.x + (fish.targetX - fish.x) * 0.50
+        fish.y = fish.y + (fish.targetY - fish.y) * 0.50
     else
         fish.flopTimer = fish.flopTimer - 1
 
         if fish.flopTimer <= 0 then
             fish.targetX = math.random(155, 285)
-            fish.targetY = math.random(104, 184)
-            fish.flopFrames = math.random(6, 10)
-            fish.flopTimer = math.random(22, 48)
+            fish.targetY = math.random(96, 190)
+            fish.flopFrames = math.random(4, 7)
+            fish.flopTimer = math.random(18, 36)
+            if math.random(1, 100) <= 20 then
+            fish.flopTimer = math.random(4, 10)
+            end
         end
     end
 end
