@@ -498,55 +498,108 @@ local function drawBowl()
     end
 end
 
-local function drawFish(fishX, fishY, isTouched)
-    local bodyX = fishX + 14
-    local bodyY = fishY - FISH_H / 2
-    local bodyW = FISH_W - 20
-    local bodyH = FISH_H
-    local tailX = fishX
-    local tailMidY = fishY
+local function getFishVisualState()
+    local squash = 0
+    local stretch = 0
+    local tilt = 0
+    local tailSwing = 0
 
-    gfx.setColor(gfx.kColorBlack)
+    if fish.state == FISH_IDLE then
+        squash = 2
+        tailSwing = math.sin(fish.bobPhase * 1.2) * 2
 
-    -- Big readable tail.
-    gfx.fillTriangle(
-        tailX + 18, tailMidY,
-        tailX, tailMidY - 14,
-        tailX, tailMidY + 14
-    )
+    elseif fish.state == FISH_TENSE then
+        squash = -2
+        tilt = -4
+        tailSwing = -4
 
-    -- Bold body silhouette.
-    gfx.fillEllipseInRect(bodyX, bodyY, bodyW, bodyH)
+    elseif fish.state == FISH_FLOP then
+        stretch = 6
+        tilt = math.sin(fish.bobPhase * 4) * 10
+        tailSwing = math.sin(fish.bobPhase * 6) * 12
 
-    -- White eye patch for contrast.
-    gfx.setColor(gfx.kColorWhite)
-    gfx.fillCircleAtPoint(bodyX + bodyW - 10, fishY - 6, 7)
-
-    -- Black pupil.
-    gfx.setColor(gfx.kColorBlack)
-    gfx.fillCircleAtPoint(bodyX + bodyW - 9, fishY - 6, 3)
-
-    -- Mouth / startled expression.
-    gfx.drawLine(bodyX + bodyW - 3, fishY + 5, bodyX + bodyW + 5, fishY + 2)
-
-    -- White highlight cut into the body so it does not read as a plain blob.
-    gfx.setColor(gfx.kColorWhite)
-    gfx.drawLine(bodyX + 10, fishY - 7, bodyX + 26, fishY - 11)
-    gfx.drawLine(bodyX + 9, fishY + 7, bodyX + 28, fishY + 12)
-
-    -- Black fin accents.
-    gfx.setColor(gfx.kColorBlack)
-    gfx.drawLine(bodyX + 16, fishY - 2, bodyX + 28, fishY - 11)
-    gfx.drawLine(bodyX + 16, fishY + 2, bodyX + 28, fishY + 11)
-
-    if isTouched then
-        -- Shock marks when booped.
-        gfx.drawLine(bodyX + bodyW + 6, fishY - 14, bodyX + bodyW + 15, fishY - 22)
-        gfx.drawLine(bodyX + bodyW + 8, fishY, bodyX + bodyW + 20, fishY)
-        gfx.drawLine(bodyX + bodyW + 6, fishY + 14, bodyX + bodyW + 15, fishY + 22)
+    elseif fish.state == FISH_RECOVER then
+        squash = 4
+        tilt = 3
+        tailSwing = 2
     end
 
+    return squash, stretch, tilt, tailSwing
+end
+
+local function drawFish(fishX, fishY, isTouched)
+    local squash, stretch, tilt, tailSwing = getFishVisualState()
+
+    local bodyX = fishX + 14
+    local bodyY = fishY - 15 + squash
+    local bodyW = 44 + stretch
+    local bodyH = 30 - squash
+
+    local headX = bodyX + bodyW - 8
+    local tailX = fishX
+    local tailY = fishY + tailSwing
+
     gfx.setColor(gfx.kColorBlack)
+
+    -- Tail
+    gfx.fillTriangle(
+        tailX + 18, fishY,
+        tailX, tailY - 13,
+        tailX, tailY + 13
+    )
+
+    -- Body
+    gfx.fillEllipseInRect(bodyX, bodyY, bodyW, bodyH)
+
+    -- Top fin
+    gfx.fillTriangle(
+        bodyX + 14, bodyY + 2,
+        bodyX + 26, bodyY - 8,
+        bodyX + 34, bodyY + 4
+    )
+
+    -- Bottom fin
+    gfx.fillTriangle(
+        bodyX + 18, bodyY + bodyH - 2,
+        bodyX + 30, bodyY + bodyH + 7,
+        bodyX + 38, bodyY + bodyH - 1
+    )
+
+    -- White face patch
+    gfx.setColor(gfx.kColorWhite)
+    gfx.fillEllipseInRect(headX - 5, fishY - 12, 22, 24)
+
+    -- Open mouth cutout
+    gfx.fillTriangle(
+        headX + 14, fishY,
+        headX + 24, fishY - 7,
+        headX + 24, fishY + 7
+    )
+
+    -- Eye
+    gfx.fillCircleAtPoint(headX + 5, fishY - 6, 7)
+
+    gfx.setColor(gfx.kColorBlack)
+    gfx.fillCircleAtPoint(headX + 6, fishY - 6, 3)
+
+    -- Gill
+    gfx.drawArc(headX - 5, fishY, 12, 80, 260)
+
+    -- White body marks
+    gfx.setColor(gfx.kColorWhite)
+    gfx.drawLine(bodyX + 8, fishY - 7, bodyX + 18, fishY - 10)
+    gfx.drawLine(bodyX + 10, fishY + 6, bodyX + 22, fishY + 9)
+    gfx.drawLine(bodyX + 24, fishY - 6, bodyX + 34, fishY - 9)
+
+    gfx.setColor(gfx.kColorBlack)
+
+    -- Flop/panic marks
+    if fish.state == FISH_FLOP or isTouched then
+        gfx.drawLine(tailX - 4, fishY - 17, tailX - 14, fishY - 23)
+        gfx.drawLine(tailX - 3, fishY + 17, tailX - 13, fishY + 23)
+        gfx.drawCircleAtPoint(headX + 24, fishY - 16, 2)
+        gfx.drawCircleAtPoint(headX + 30, fishY + 10, 2)
+    end
 end
 
 local function drawPaw()
