@@ -137,6 +137,11 @@ local function drawHalftoneDots(x, y, count)
     end
 end
 
+local function drawTextCentered(text, centerX, y)
+    local textW, _ = gfx.getTextSize(text)
+    gfx.drawText(text, centerX - (textW / 2), y)
+end
+
 -- =========================================================
 -- Persistence
 -- =========================================================
@@ -468,15 +473,15 @@ local function drawTouchBanner()
 
     drawSpeechBubble(120, 48, 162, 32)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawTextAligned("TOUCHED DA FISHY!", 201, 57, kTextAlignment.center)
+    drawTextCentered("TOUCHED DA FISHY!", 201, 57)
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
 end
 
 local function drawPlayLogo()
     drawPanel(16, 42, 166, 52, 10)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawTextAligned("TOUCH DA", 99, 54, kTextAlignment.center)
-    gfx.drawTextAligned("FISHY", 99, 70, kTextAlignment.center)
+    drawTextCentered("TOUCH DA", 99, 54)
+    drawTextCentered("FISHY", 99, 70)
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
     drawHalftoneDots(24, 66, 3)
 end
@@ -521,8 +526,8 @@ end
 local function drawTitleOverlay()
     drawPanel(18, 10, 180, 78, 10)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawTextAligned("TOUCH DA", 108, 24, kTextAlignment.center)
-    gfx.drawTextAligned("FISHY", 108, 46, kTextAlignment.center)
+    drawTextCentered("TOUCH DA", 108, 24)
+    drawTextCentered("FISHY", 108, 46)
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
 
     drawPanel(220, 12, 162, 52, 8)
@@ -534,9 +539,9 @@ local function drawTitleOverlay()
     drawPanel(76, 188, 248, 26, 8)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
     if titlePulseFrames < 30 then
-        gfx.drawTextAligned("PRESS A TO START", 200, 195, kTextAlignment.center)
+        drawTextCentered("PRESS A TO START", 200, 195)
     else
-        gfx.drawTextAligned("BOOP FISH WITH CRANK", 200, 195, kTextAlignment.center)
+        drawTextCentered("BOOP FISH WITH CRANK", 200, 195)
     end
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
 
@@ -564,10 +569,10 @@ local function drawGameOverScreen()
 
     drawPanel(52, 34, 296, 160, 12)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawTextAligned("FISHY GOT AWAY", 200, 56, kTextAlignment.center)
-    gfx.drawTextAligned("FINAL SCORE " .. tostring(score), 200, 102, kTextAlignment.center)
-    gfx.drawTextAligned("BEST SCORE " .. tostring(highScore), 200, 122, kTextAlignment.center)
-    gfx.drawTextAligned("PRESS A TO PLAY AGAIN", 200, 156, kTextAlignment.center)
+    drawTextCentered("FISHY GOT AWAY", 200, 56)
+    drawTextCentered("FINAL SCORE " .. tostring(score), 200, 102)
+    drawTextCentered("BEST SCORE " .. tostring(highScore), 200, 122)
+    drawTextCentered("PRESS A TO PLAY AGAIN", 200, 156)
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
     drawHalftoneDots(80, 80, 3)
 end
