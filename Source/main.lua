@@ -73,12 +73,16 @@ local arm = {
 }
 
 local fish = {
-    x = SCREEN_W + 20,
+    x = 230,
     y = 150,
+    targetX = 230,
+    targetY = 150,
     speed = FISH_BASE_SPEED,
     bobPhase = 0,
     bobAmplitude = 3,
+    flopTimer = 0,
     touchedFrames = 0,
+    
 }
 
 -- Pre-rendered title art based on the source meme, converted to 1-bit.
@@ -98,7 +102,15 @@ local function clamp(value, minValue, maxValue)
 end
 
 local function getFishDrawY()
-    return fish.y + math.sin(fish.bobPhase) * fish.bobAmplitude
+    local idleWiggle = math.sin(fish.bobPhase) * 1.5
+
+    if fish.flopFrames > 0 then
+        local flopProgress = fish.flopFrames / 14
+        local bounce = math.sin(flopProgress * math.pi) * 10
+        return fish.y - bounce + idleWiggle
+    end
+
+    return fish.y + idleWiggle
 end
 
 local function getPawPosition()
@@ -170,11 +182,15 @@ local function showCrankHint(frames)
 end
 
 local function spawnFish()
-    fish.x = SCREEN_W + math.random(10, 60)
-    fish.y = math.random(140, 178)
-    fish.speed = FISH_BASE_SPEED + (score * FISH_SCORE_SPEED_BONUS) + (misses * FISH_MISS_SPEED_BONUS)
+    fish.x = math.random(170, 255)
+    fish.y = math.random(108, 184)
+    fish.targetX = fish.x
+    fish.targetY = fish.y
+    fish.speed = FISH_BASE_SPEED
     fish.bobPhase = math.random() * math.pi * 2
-    fish.bobAmplitude = math.random(3, 7)
+    fish.bobAmplitude = math.random(2, 4)
+    fish.flopTimer = math.random(45, 90)
+    fish.flopFrames = 0
     fish.touchedFrames = 0
 end
 
@@ -268,11 +284,22 @@ local function updateArmFromCrank()
 end
 
 local function updateFish()
-    fish.x = fish.x - fish.speed
-    fish.bobPhase = fish.bobPhase + 0.12
+    fish.bobPhase = fish.bobPhase + 0.16
 
-    if fish.x + FISH_W < 0 then
-        handleFishEscape()
+    if fish.flopFrames > 0 then
+        fish.flopFrames = fish.flopFrames - 1
+
+        fish.x = fish.x + (fish.targetX - fish.x) * 0.34
+        fish.y = fish.y + (fish.targetY - fish.y) * 0.34
+    else
+        fish.flopTimer = fish.flopTimer - 1
+
+        if fish.flopTimer <= 0 then
+            fish.targetX = math.random(155, 285)
+            fish.targetY = math.random(104, 184)
+            fish.flopFrames = math.random(6, 10)
+            fish.flopTimer = math.random(22, 48)
+        end
     end
 end
 
@@ -503,7 +530,7 @@ local function drawPlayfield()
     drawCountertop()
     drawSidePlate()
     drawBowl()
-    drawPlayLogo()
+    --drawPlayLogo()
     drawPaw()
     drawFish(fish.x, getFishDrawY(), fish.touchedFrames > 0)
     drawHUD()
