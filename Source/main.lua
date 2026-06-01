@@ -1,11 +1,9 @@
 import "CoreLibs/graphics"
 import "CoreLibs/ui"
 import "CoreLibs/crank"
-import "CoreLibs/timer"
 
 local gfx = playdate.graphics
 local ui = playdate.ui
-local timer = playdate.timer
 local geom = playdate.geometry
 local datastore = playdate.datastore
 local snd = playdate.sound
@@ -750,7 +748,6 @@ function playdate.update()
         drawGameOverScreen()
     end
 
-    timer.updateTimers()
 end
 
 function playdate.crankDocked()
