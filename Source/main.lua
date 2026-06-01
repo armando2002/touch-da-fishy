@@ -6,7 +6,9 @@ import "CoreLibs/timer"
 local gfx = playdate.graphics
 local ui = playdate.ui
 local timer = playdate.timer
+local geom = playdate.geometry
 local datastore = playdate.datastore
+local snd = playdate.sound
 
 playdate.display.setRefreshRate(30)
 math.randomseed(playdate.getSecondsSinceEpoch())
@@ -22,31 +24,38 @@ local STATE_TITLE = "title"
 local STATE_PLAY = "play"
 local STATE_GAMEOVER = "gameover"
 
--- Paw / reach behavior. The crank is the star: it extends the paw.
-local ARM_BASE_X = 30
-local ARM_MIN_LENGTH = 26
-local ARM_MAX_LENGTH = 275
-local ARM_RETRACT_PER_FRAME = 1.2
-local ARM_CRANK_MULTIPLIER = 3.0
+-- Cat paw reach. The crank extends the paw; it always sags back, so the
+-- player has to keep working the crank to stay extended.
+local ARM_BASE_X = 34
+local ARM_MIN_LENGTH = 24
+local ARM_MAX_LENGTH = 340
+local ARM_RETRACT_PER_FRAME = 1.1
+local ARM_CRANK_MULTIPLIER = 3.2
 local ARM_MOVE_SPEED = 4
-local PAW_RADIUS = 10
+local PAW_RADIUS = 11
+local ARM_MIN_Y = 92
+local ARM_MAX_Y = 168
 
--- Fish behavior
-local FISH_W = 62
-local FISH_H = 32
-local FISH_BASE_SPEED = 1.5
-local FISH_SCORE_SPEED_BONUS = 0.12
-local FISH_MISS_SPEED_BONUS = 0.08
+-- Fish drawing size (half-extents of the body ellipse).
+local FISH_A = 16 -- half length (nose to tail base)
+local FISH_B = 8  -- half girth
+local FISH_HIT_RADIUS = 13
+
+-- The plate the fish flops around on (allowed range for the fish CENTER).
+local PLATE_MIN_X = 276
+local PLATE_MAX_X = 356
+local PLATE_MIN_Y = 116
+local PLATE_MAX_Y = 150
 
 -- Win / lose state
 local MAX_MISSES = 3
 local TOUCH_BANNER_FRAMES = 22
-local MISS_FLASH_FRAMES = 20
-local FISH_TOUCHED_FRAMES = 12
+local MISS_FLASH_FRAMES = 18
+local FISH_TOUCHED_FRAMES = 10
 
--- Crank motion needed to count as an intentional "touch"
+-- Crank motion needed to count as an intentional "boop".
 local TOUCH_CRANK_THRESHOLD = 0.6
-local TOUCH_ENERGY_THRESHOLD = 4.2
+local TOUCH_ENERGY_THRESHOLD = 4.0
 
 local SAVE_KEY = "touch_da_fishy"
 
@@ -66,23 +75,58 @@ local crankHintFrames = 0
 local titlePulseFrames = 0
 
 local arm = {
-    y = 122,
+    y = 124,
     length = ARM_MIN_LENGTH,
     lastCrankChange = 0,
     crankEnergy = 0,
 }
 
+-- Fish on the plate. It cycles through flop "modes": it settles and idle-flops,
+-- crouches as a tell ("wind"), hops in an arc to a new spot, and after a few
+-- hops it does a big escape leap off the plate.
 local fish = {
-    x = SCREEN_W + 20,
-    y = 150,
-    speed = FISH_BASE_SPEED,
-    bobPhase = 0,
-    bobAmplitude = 3,
+    mode = "settle",
+    modeTimer = 0,
+    modeDuration = 70,
+
+    x = 316, y = 132,         -- logical resting center
+    drawX = 316, drawY = 132, -- where it is actually drawn this frame (used for hit test)
+
+    fromX = 316, fromY = 132,
+    toX = 316, toY = 132,
+    hopHeight = 22,
+    spinDir = 1,
+
+    flopsRemaining = 4,
+    flopPhase = 0,
+    angle = 0,
+    tailFlap = 0,
+    squashX = 1,
+    squashY = 1,
+    landSquash = 0,
     touchedFrames = 0,
+    agitated = false,
 }
 
--- Pre-rendered title art based on the source meme, converted to 1-bit.
+-- Optional pre-rendered title art (used on title / game-over screens).
 local titleBackground = gfx.image.new("title_background")
+
+-- Asset-free sound effects via the synth. Guarded so the game still runs if
+-- the sound API is ever unavailable.
+local sfx = {}
+local function initSound()
+    if snd == nil then return end
+    sfx.boop = snd.synth.new(snd.kWaveSquare)
+    sfx.hop = snd.synth.new(snd.kWaveSine)
+    sfx.escape = snd.synth.new(snd.kWaveSawtooth)
+    sfx.over = snd.synth.new(snd.kWaveSawtooth)
+end
+
+local function play(s, note, vol, len)
+    if s ~= nil then
+        s:playNote(note, vol or 0.4, len or 0.08)
+    end
+end
 
 -- =========================================================
 -- Helpers
@@ -97,21 +141,22 @@ local function clamp(value, minValue, maxValue)
     return value
 end
 
-local function getFishDrawY()
-    return fish.y + math.sin(fish.bobPhase) * fish.bobAmplitude
+local function lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+-- 0 (easy) .. 1 (hard). Climbs over the first ~18 points.
+local function difficulty()
+    return clamp(score / 18, 0, 1)
 end
 
 local function getPawPosition()
     return ARM_BASE_X + arm.length, arm.y
 end
 
--- Circle-vs-rectangle overlap is enough for the paw and fish hitbox.
-local function circleRectOverlap(cx, cy, radius, rx, ry, rw, rh)
-    local closestX = clamp(cx, rx, rx + rw)
-    local closestY = clamp(cy, ry, ry + rh)
-    local dx = cx - closestX
-    local dy = cy - closestY
-    return (dx * dx + dy * dy) <= (radius * radius)
+-- Rotate a local-space point around the origin.
+local function rotLocal(x, y, sinA, cosA)
+    return x * cosA - y * sinA, x * sinA + y * cosA
 end
 
 local function drawPanel(x, y, w, h, radius)
@@ -169,13 +214,45 @@ local function showCrankHint(frames)
     ui.crankIndicator.clockwise = true
 end
 
+-- Pick a new flop target on the plate that is meaningfully different from
+-- where the fish is now, so the player is forced to re-aim.
+local function pickPlateTarget()
+    local d = difficulty()
+    for _ = 1, 8 do
+        local tx = math.random(PLATE_MIN_X, PLATE_MAX_X)
+        local ty = math.random(PLATE_MIN_Y, PLATE_MAX_Y)
+        local moved = math.abs(tx - fish.x) + math.abs(ty - fish.y)
+        if moved > lerp(28, 44, d) then
+            return tx, ty
+        end
+    end
+    -- Fallback: jump to the opposite side of the plate.
+    local tx = (fish.x < (PLATE_MIN_X + PLATE_MAX_X) / 2) and PLATE_MAX_X or PLATE_MIN_X
+    return tx, math.random(PLATE_MIN_Y, PLATE_MAX_Y)
+end
+
+local function enterSettle()
+    local d = difficulty()
+    fish.mode = "settle"
+    fish.modeTimer = 0
+    fish.modeDuration = math.floor(lerp(78, 30, d))
+    fish.landSquash = 7
+    fish.agitated = false
+end
+
 local function spawnFish()
-    fish.x = SCREEN_W + math.random(10, 60)
-    fish.y = math.random(140, 178)
-    fish.speed = FISH_BASE_SPEED + (score * FISH_SCORE_SPEED_BONUS) + (misses * FISH_MISS_SPEED_BONUS)
-    fish.bobPhase = math.random() * math.pi * 2
-    fish.bobAmplitude = math.random(3, 7)
+    local d = difficulty()
+    fish.x = math.random(PLATE_MIN_X, PLATE_MAX_X)
+    fish.y = math.random(PLATE_MIN_Y, PLATE_MAX_Y)
+    fish.drawX, fish.drawY = fish.x, fish.y
+    fish.flopsRemaining = math.max(2, math.floor(lerp(5, 2, d) + 0.5))
+    fish.flopPhase = math.random() * math.pi * 2
+    fish.angle = 0
+    fish.tailFlap = 0
+    fish.squashX, fish.squashY = 1, 1
     fish.touchedFrames = 0
+    fish.spinDir = (math.random() < 0.5) and -1 or 1
+    enterSettle()
 end
 
 local function resetArm()
@@ -208,10 +285,10 @@ local function handleTouchSuccess()
 
     touchBannerFrames = TOUCH_BANNER_FRAMES
     fish.touchedFrames = FISH_TOUCHED_FRAMES
+    play(sfx.boop, "C6", 0.5, 0.07)
 
-    -- Pull the paw back slightly after a successful boop so the
-    -- player has to crank again for the next fish.
-    arm.length = clamp(arm.length - 10, ARM_MIN_LENGTH, ARM_MAX_LENGTH)
+    -- Pull the paw back after a boop so the player has to crank out again.
+    arm.length = clamp(arm.length - 40, ARM_MIN_LENGTH, ARM_MAX_LENGTH)
 
     spawnFish()
 end
@@ -223,14 +300,123 @@ local function handleFishEscape()
 
     if misses >= MAX_MISSES then
         updateHighScoreIfNeeded()
+        play(sfx.over, "A2", 0.5, 0.5)
         gameState = STATE_GAMEOVER
     else
+        play(sfx.escape, "G3", 0.45, 0.25)
         spawnFish()
     end
 end
 
 -- =========================================================
--- Update logic
+-- Fish flop state machine
+-- =========================================================
+
+local function beginWind()
+    fish.mode = "wind"
+    fish.modeTimer = 0
+    fish.modeDuration = 8
+    fish.fromX, fish.fromY = fish.x, fish.y
+    if fish.flopsRemaining > 0 then
+        fish.toX, fish.toY = pickPlateTarget()
+        fish.agitated = false
+    else
+        -- About to bolt: leap up and off to the right.
+        fish.toX = SCREEN_W + 50
+        fish.toY = math.random(-30, 50)
+        fish.agitated = true
+    end
+end
+
+local function beginHopOrEscape()
+    local d = difficulty()
+    fish.modeTimer = 0
+    fish.fromX, fish.fromY = fish.x, fish.y
+    if fish.flopsRemaining > 0 then
+        fish.mode = "hop"
+        fish.modeDuration = math.floor(lerp(16, 11, d))
+        fish.hopHeight = lerp(18, 30, d) + math.random(0, 6)
+        play(sfx.hop, "E4", 0.25, 0.05)
+    else
+        fish.mode = "escape"
+        fish.modeDuration = math.floor(lerp(22, 15, d))
+        fish.hopHeight = 70
+        play(sfx.escape, "C4", 0.3, 0.12)
+    end
+end
+
+local function updateFishFlop()
+    fish.flopPhase = fish.flopPhase + 0.35
+    fish.modeTimer = fish.modeTimer + 1
+
+    if fish.landSquash > 0 then
+        fish.landSquash = fish.landSquash - 1
+    end
+
+    local cx, cy = fish.x, fish.y
+    local mode = fish.mode
+
+    if mode == "settle" then
+        -- Idle flopping in place: gentle tilt, flapping tail, little bounces.
+        fish.angle = math.sin(fish.flopPhase) * 0.10
+        fish.tailFlap = math.sin(fish.flopPhase * 1.6) * 0.5
+        cy = fish.y - math.abs(math.sin(fish.flopPhase * 0.9)) * 2
+        if fish.modeTimer >= fish.modeDuration then
+            beginWind()
+        end
+
+    elseif mode == "wind" then
+        -- Crouch + twitch: the tell before a hop or an escape.
+        local lean = (fish.toX >= fish.x) and 0.18 or -0.18
+        fish.angle = lean
+        fish.tailFlap = math.sin(fish.flopPhase * 3.2) * 0.8
+        if fish.modeTimer >= fish.modeDuration then
+            beginHopOrEscape()
+        end
+
+    elseif mode == "hop" then
+        local t = clamp(fish.modeTimer / fish.modeDuration, 0, 1)
+        cx = lerp(fish.fromX, fish.toX, t)
+        cy = lerp(fish.fromY, fish.toY, t) - fish.hopHeight * math.sin(math.pi * t)
+        local arch = (0.7 + 0.5 * difficulty()) * fish.spinDir
+        fish.angle = math.sin(math.pi * t) * arch
+        fish.tailFlap = math.sin(fish.flopPhase * 3.0) * 0.9
+        if t >= 1 then
+            fish.x, fish.y = fish.toX, fish.toY
+            cx, cy = fish.x, fish.y
+            fish.flopsRemaining = fish.flopsRemaining - 1
+            enterSettle()
+        end
+
+    elseif mode == "escape" then
+        local t = clamp(fish.modeTimer / fish.modeDuration, 0, 1)
+        cx = lerp(fish.fromX, fish.toX, t)
+        cy = lerp(fish.fromY, fish.toY, t) - fish.hopHeight * math.sin(math.pi * t * 0.8)
+        fish.angle = t * math.pi * 1.6 * fish.spinDir
+        fish.tailFlap = math.sin(fish.flopPhase * 3.4) * 1.0
+        fish.x, fish.y = cx, cy
+        if t >= 1 or cx > SCREEN_W + 30 or cy < -40 then
+            handleFishEscape()
+            return
+        end
+    end
+
+    -- Squash & stretch from the most recent landing.
+    if fish.landSquash > 0 then
+        local s = fish.landSquash / 7
+        fish.squashY = lerp(1, 0.65, s)
+        fish.squashX = lerp(1, 1.25, s)
+    elseif mode == "wind" then
+        fish.squashY, fish.squashX = 0.8, 1.12
+    else
+        fish.squashY, fish.squashX = 1, 1
+    end
+
+    fish.drawX, fish.drawY = cx, cy
+end
+
+-- =========================================================
+-- Update logic (paw)
 -- =========================================================
 
 local function updateAim()
@@ -240,9 +426,7 @@ local function updateAim()
     if playdate.buttonIsPressed(playdate.kButtonDown) then
         arm.y = arm.y + ARM_MOVE_SPEED
     end
-
-    -- Keep the paw inside the bowl area so the playfield mirrors the title art.
-    arm.y = clamp(arm.y, 96, 180)
+    arm.y = clamp(arm.y, ARM_MIN_Y, ARM_MAX_Y)
 end
 
 local function updateArmFromCrank()
@@ -256,24 +440,13 @@ local function updateArmFromCrank()
         arm.length = arm.length + (crankChange * ARM_CRANK_MULTIPLIER)
     end
 
-    -- The paw slowly retracts every frame so the crank remains the
-    -- centerpiece of the interaction.
+    -- The paw sags back every frame so the crank stays the centerpiece.
     arm.length = arm.length - ARM_RETRACT_PER_FRAME
     arm.length = clamp(arm.length, ARM_MIN_LENGTH, ARM_MAX_LENGTH)
 
-    -- Blend in a little motion history so fast crank bursts still count
-    -- even if a single frame's delta is small.
+    -- Blend in motion history so fast bursts still register as a boop.
     arm.crankEnergy = arm.crankEnergy * 0.82 + math.abs(acceleratedChange) * 0.18
     arm.lastCrankChange = crankChange
-end
-
-local function updateFish()
-    fish.x = fish.x - fish.speed
-    fish.bobPhase = fish.bobPhase + 0.12
-
-    if fish.x + FISH_W < 0 then
-        handleFishEscape()
-    end
 end
 
 local function canTouchFish()
@@ -284,39 +457,34 @@ local function checkTouch()
     if not canTouchFish() then
         return
     end
+    if fish.touchedFrames > 0 then
+        return
+    end
 
     local pawX, pawY = getPawPosition()
-    local fishY = getFishDrawY()
-
-    local fishRectX = fish.x
-    local fishRectY = fishY - (FISH_H / 2)
-
-    if circleRectOverlap(pawX, pawY, PAW_RADIUS, fishRectX, fishRectY, FISH_W, FISH_H) then
+    local dx = pawX - fish.drawX
+    local dy = pawY - fish.drawY
+    local reach = PAW_RADIUS + FISH_HIT_RADIUS
+    if (dx * dx + dy * dy) <= (reach * reach) then
         handleTouchSuccess()
     end
 end
 
 local function updateFrameCounters()
-    if touchBannerFrames > 0 then
-        touchBannerFrames = touchBannerFrames - 1
-    end
-    if missFlashFrames > 0 then
-        missFlashFrames = missFlashFrames - 1
-    end
-    if crankHintFrames > 0 then
-        crankHintFrames = crankHintFrames - 1
-    end
-    if fish.touchedFrames > 0 then
-        fish.touchedFrames = fish.touchedFrames - 1
-    end
+    if touchBannerFrames > 0 then touchBannerFrames = touchBannerFrames - 1 end
+    if missFlashFrames > 0 then missFlashFrames = missFlashFrames - 1 end
+    if crankHintFrames > 0 then crankHintFrames = crankHintFrames - 1 end
+    if fish.touchedFrames > 0 then fish.touchedFrames = fish.touchedFrames - 1 end
     titlePulseFrames = (titlePulseFrames + 1) % 60
 end
 
 local function updatePlayState()
     updateAim()
     updateArmFromCrank()
-    updateFish()
-    checkTouch()
+    updateFishFlop()
+    if gameState == STATE_PLAY then
+        checkTouch()
+    end
     updateFrameCounters()
 end
 
@@ -325,115 +493,65 @@ end
 -- =========================================================
 
 local function drawCountertop()
-    gfx.fillRect(0, 200, SCREEN_W, 40)
+    gfx.setColor(gfx.kColorBlack)
+    gfx.fillRect(0, 206, SCREEN_W, 34)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
     for x = 10, SCREEN_W, 26 do
-        gfx.drawLine(x, 212, x + 10, 230)
+        gfx.drawLine(x, 216, x + 10, 232)
     end
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
 end
 
-local function drawSidePlate()
-    -- Removed for v0.2 fish readability pass.
-    -- The upper-right plate competed visually with the fish target.
-end
-
-local function drawBowl()
-    -- Large readable bowl outline instead of one solid black blob.
-    -- This keeps the gameplay area grounded without competing with the fish.
-    local bowlX = 40
-    local bowlY = 112
-    local bowlW = 280
-    local bowlH = 112
-
+local function drawPlate()
+    -- Plate seen slightly from above: outer rim, inner dish, a little shine.
     gfx.setColor(gfx.kColorBlack)
-
-    -- Outer rim
-    gfx.setLineWidth(3)
-    gfx.drawEllipseInRect(bowlX, bowlY, bowlW, bowlH)
-
-    -- Inner water/broth boundary
+    gfx.fillEllipseInRect(252, 150, 136, 46) -- plate base shadow band
+    gfx.setColor(gfx.kColorWhite)
+    gfx.fillEllipseInRect(248, 96, 144, 80)
+    gfx.setColor(gfx.kColorBlack)
     gfx.setLineWidth(2)
-    gfx.drawEllipseInRect(bowlX + 14, bowlY + 14, bowlW - 28, bowlH - 34)
-
+    gfx.drawEllipseInRect(248, 96, 144, 80)
+    gfx.drawEllipseInRect(266, 108, 108, 56)
     gfx.setLineWidth(1)
-
-    -- A few simple dark broth marks, not a giant filled blob.
-    for x = 96, 246, 38 do
-        gfx.drawLine(x, 166, x + 16, 154)
-        gfx.drawLine(x + 5, 176, x + 20, 162)
-    end
+    gfx.drawLine(286, 116, 300, 112)
 end
 
-local function drawFish(fishX, fishY, isTouched)
-    local bodyX = fishX + 14
-    local bodyY = fishY - FISH_H / 2
-    local bodyW = FISH_W - 20
-    local bodyH = FISH_H
-    local tailX = fishX
-    local tailMidY = fishY
-
-    gfx.setColor(gfx.kColorBlack)
-
-    -- Big readable tail.
-    gfx.fillTriangle(
-        tailX + 18, tailMidY,
-        tailX, tailMidY - 14,
-        tailX, tailMidY + 14
-    )
-
-    -- Bold body silhouette.
-    gfx.fillEllipseInRect(bodyX, bodyY, bodyW, bodyH)
-
-    -- White eye patch for contrast.
+local function drawCat()
+    -- Simple outlined cat head at the left, matching the title art.
     gfx.setColor(gfx.kColorWhite)
-    gfx.fillCircleAtPoint(bodyX + bodyW - 10, fishY - 6, 7)
-
-    -- Black pupil.
+    gfx.fillCircleAtPoint(18, 120, 20)
     gfx.setColor(gfx.kColorBlack)
-    gfx.fillCircleAtPoint(bodyX + bodyW - 9, fishY - 6, 3)
-
-    -- Mouth / startled expression.
-    gfx.drawLine(bodyX + bodyW - 3, fishY + 5, bodyX + bodyW + 5, fishY + 2)
-
-    -- White highlight cut into the body so it does not read as a plain blob.
-    gfx.setColor(gfx.kColorWhite)
-    gfx.drawLine(bodyX + 10, fishY - 7, bodyX + 26, fishY - 11)
-    gfx.drawLine(bodyX + 9, fishY + 7, bodyX + 28, fishY + 12)
-
-    -- Black fin accents.
-    gfx.setColor(gfx.kColorBlack)
-    gfx.drawLine(bodyX + 16, fishY - 2, bodyX + 28, fishY - 11)
-    gfx.drawLine(bodyX + 16, fishY + 2, bodyX + 28, fishY + 11)
-
-    if isTouched then
-        -- Shock marks when booped.
-        gfx.drawLine(bodyX + bodyW + 6, fishY - 14, bodyX + bodyW + 15, fishY - 22)
-        gfx.drawLine(bodyX + bodyW + 8, fishY, bodyX + bodyW + 20, fishY)
-        gfx.drawLine(bodyX + bodyW + 6, fishY + 14, bodyX + bodyW + 15, fishY + 22)
-    end
-
-    gfx.setColor(gfx.kColorBlack)
+    gfx.setLineWidth(2)
+    gfx.drawCircleAtPoint(18, 120, 20)
+    -- Ears
+    gfx.drawLine(4, 104, 8, 86)
+    gfx.drawLine(8, 86, 20, 100)
+    gfx.drawLine(18, 99, 30, 86)
+    gfx.drawLine(30, 86, 34, 104)
+    gfx.setLineWidth(1)
+    -- Face
+    gfx.fillCircleAtPoint(12, 116, 2)
+    gfx.fillCircleAtPoint(24, 116, 2)
+    gfx.drawLine(14, 124, 18, 127)
+    gfx.drawLine(18, 127, 22, 124)
 end
 
 local function drawPaw()
     local pawX, pawY = getPawPosition()
 
-    -- Arm / foreleg reaching toward the fish.
-    gfx.setLineWidth(10)
+    gfx.setColor(gfx.kColorBlack)
+    -- Foreleg reaching toward the plate.
+    gfx.setLineWidth(11)
     gfx.drawLine(ARM_BASE_X, arm.y, pawX - 6, pawY)
-    gfx.setLineWidth(2)
-    gfx.drawLine(ARM_BASE_X - 2, arm.y - 7, pawX - 9, pawY - 7)
-    gfx.drawLine(ARM_BASE_X - 2, arm.y + 7, pawX - 9, pawY + 7)
     gfx.setLineWidth(1)
 
-    -- Main paw pad
+    -- Main paw pad.
     gfx.fillCircleAtPoint(pawX, pawY, PAW_RADIUS)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+    gfx.setColor(gfx.kColorWhite)
     gfx.fillCircleAtPoint(pawX - 1, pawY + 3, 4)
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
+    gfx.setColor(gfx.kColorBlack)
 
-    -- Toes / claws
+    -- Toes / claws.
     gfx.fillCircleAtPoint(pawX - 8, pawY - 8, 4)
     gfx.fillCircleAtPoint(pawX - 1, pawY - 11, 4)
     gfx.fillCircleAtPoint(pawX + 7, pawY - 8, 4)
@@ -442,75 +560,137 @@ local function drawPaw()
     gfx.drawLine(pawX + 7, pawY - 14, pawX + 10, pawY - 18)
 end
 
-local function drawHUD()
-    drawPanel(10, 8, 108, 28, 8)
-    drawPanel(126, 8, 100, 28, 8)
-    drawPanel(234, 8, 124, 28, 8)
+-- Draws the flopping fish centered at (cx, cy), rotated by `angle`, with the
+-- body squashed by (sqX, sqY) and the tail flapped by `tailFlap` radians.
+local function drawFish(cx, cy, angle, sqX, sqY, tailFlap, isTouched)
+    local sinA = math.sin(angle)
+    local cosA = math.cos(angle)
+    local a = FISH_A * sqX
+    local b = FISH_B * sqY
 
+    -- Body as a rotated ellipse polygon.
+    local N = 14
+    local coords = {}
+    for i = 0, N - 1 do
+        local th = (i / N) * 2 * math.pi
+        local lx = math.cos(th) * a
+        local ly = math.sin(th) * b
+        local rx, ry = rotLocal(lx, ly, sinA, cosA)
+        coords[#coords + 1] = cx + rx
+        coords[#coords + 1] = cy + ry
+    end
+    local body = geom.polygon.new(table.unpack(coords))
+    body:close()
+    gfx.setColor(gfx.kColorBlack)
+    gfx.fillPolygon(body)
+
+    -- Tail: triangle behind the body, whipped by tailFlap around its base.
+    local baseLx, baseLy = -a * 0.55, 0
+    local function tailPoint(lx, ly)
+        -- flap around the tail base, then rotate with the body.
+        local rdx = lx - baseLx
+        local rdy = ly - baseLy
+        local fs, fc = math.sin(tailFlap), math.cos(tailFlap)
+        local fx = baseLx + rdx * fc - rdy * fs
+        local fy = baseLy + rdx * fs + rdy * fc
+        local gx, gy = rotLocal(fx, fy, sinA, cosA)
+        return cx + gx, cy + gy
+    end
+    local b1x, b1y = rotLocal(baseLx, baseLy, sinA, cosA)
+    local t1x, t1y = tailPoint(-a * 1.5, -b * 1.1)
+    local t2x, t2y = tailPoint(-a * 1.5, b * 1.1)
+    gfx.fillTriangle(cx + b1x, cy + b1y, t1x, t1y, t2x, t2y)
+
+    -- Dorsal fin on top.
+    local function loc(lx, ly)
+        local rx, ry = rotLocal(lx, ly, sinA, cosA)
+        return cx + rx, cy + ry
+    end
+    local f1x, f1y = loc(-a * 0.15, -b * 0.8)
+    local f2x, f2y = loc(a * 0.2, -b * 0.8)
+    local f3x, f3y = loc(0, -b * 1.9)
+    gfx.fillTriangle(f1x, f1y, f2x, f2y, f3x, f3y)
+
+    -- Eye near the head end.
+    local ex, ey = loc(a * 0.55, -b * 0.3)
+    gfx.setColor(gfx.kColorWhite)
+    gfx.fillCircleAtPoint(ex, ey, 2)
+    gfx.setColor(gfx.kColorBlack)
+    if not isTouched then
+        gfx.fillCircleAtPoint(ex, ey, 1)
+    end
+
+    -- "X" eye and dizzy stars when freshly booped.
+    if isTouched then
+        gfx.setLineWidth(1)
+        gfx.drawLine(ex - 2, ey - 2, ex + 2, ey + 2)
+        gfx.drawLine(ex - 2, ey + 2, ex + 2, ey - 2)
+        gfx.drawCircleAtPoint(cx, cy - FISH_B - 10, 2)
+        gfx.drawCircleAtPoint(cx + 9, cy - FISH_B - 6, 1)
+        gfx.drawCircleAtPoint(cx - 9, cy - FISH_B - 6, 1)
+    end
+end
+
+-- Little agitation ticks shown when the fish is about to bolt.
+local function drawAgitation(cx, cy)
+    gfx.setColor(gfx.kColorBlack)
+    gfx.drawLine(cx - 18, cy - 16, cx - 22, cy - 22)
+    gfx.drawLine(cx + 18, cy - 16, cx + 22, cy - 22)
+    gfx.drawLine(cx, cy - FISH_B - 12, cx, cy - FISH_B - 18)
+end
+
+local function drawHUD()
+    -- Slim single top bar.
+    gfx.setColor(gfx.kColorBlack)
+    gfx.fillRoundRect(8, 6, SCREEN_W - 16, 22, 6)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawText("SCORE " .. tostring(score), 22, 15)
-    gfx.drawText("BEST " .. tostring(highScore), 138, 15)
-    gfx.drawText("MISSES " .. tostring(misses) .. "/" .. tostring(MAX_MISSES), 246, 15)
+    gfx.drawText("SCORE " .. tostring(score), 18, 11)
+    gfx.drawTextAligned("BEST " .. tostring(highScore), 200, 11, kTextAlignment.center)
+    gfx.drawTextAligned("MISSES " .. tostring(misses) .. "/" .. tostring(MAX_MISSES), SCREEN_W - 18, 11, kTextAlignment.right)
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
 
-    drawPanel(12, 206, 198, 24, 8)
-    drawPanel(218, 206, 170, 24, 8)
+    -- Slim single bottom hint.
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawText("CRANK = REACH / BOOP", 24, 212)
-    gfx.drawText("UP/DOWN = AIM", 234, 212)
+    gfx.drawText("CRANK = REACH", 14, 214)
+    gfx.drawTextAligned("UP/DOWN = AIM", SCREEN_W - 16, 214, kTextAlignment.right)
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
 end
 
 local function drawTouchBanner()
-    if touchBannerFrames <= 0 then
-        return
-    end
-
-    drawSpeechBubble(120, 48, 162, 32)
+    if touchBannerFrames <= 0 then return end
+    gfx.setColor(gfx.kColorBlack)
+    drawSpeechBubble(119, 40, 162, 30)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawTextAligned("TOUCHED DA FISHY!", 201, 57, kTextAlignment.center)
+    gfx.drawTextAligned("TOUCHED DA FISHY!", 200, 48, kTextAlignment.center)
     gfx.setImageDrawMode(gfx.kDrawModeCopy)
-end
-
-local function drawPlayLogo()
-    drawPanel(16, 42, 166, 52, 10)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawTextAligned("TOUCH DA", 99, 54, kTextAlignment.center)
-    gfx.drawTextAligned("FISHY", 99, 70, kTextAlignment.center)
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
-    drawHalftoneDots(24, 66, 3)
 end
 
 local function drawPlayfield()
     local invertScreen = missFlashFrames > 0
 
-    if titleBackground ~= nil then
-        titleBackground:draw(0, 0)
-        -- White wash over the title art so gameplay elements remain legible
-        -- while still feeling like the same scene.
-        gfx.setColor(gfx.kColorWhite)
-        gfx.fillRect(0, 0, SCREEN_W, SCREEN_H)
-        gfx.setColor(gfx.kColorBlack)
-    else
-        gfx.clear(gfx.kColorWhite)
-    end
+    gfx.clear(gfx.kColorWhite)
 
     if invertScreen then
+        gfx.setColor(gfx.kColorBlack)
         gfx.fillRect(0, 0, SCREEN_W, SCREEN_H)
         gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
     end
 
     drawCountertop()
-    drawSidePlate()
-    drawBowl()
-    drawPlayLogo()
+    drawPlate()
+    drawCat()
     drawPaw()
-    drawFish(fish.x, getFishDrawY(), fish.touchedFrames > 0)
+
+    if fish.agitated then
+        drawAgitation(fish.drawX, fish.drawY)
+    end
+    drawFish(fish.drawX, fish.drawY, fish.angle, fish.squashX, fish.squashY, fish.tailFlap, fish.touchedFrames > 0)
+
     drawHUD()
     drawTouchBanner()
 
     if crankHintFrames > 0 or playdate.isCrankDocked() then
-        ui.crankIndicator:draw(346, 44)
+        ui.crankIndicator:draw(346, 36)
     end
 
     if invertScreen then
@@ -518,50 +698,22 @@ local function drawPlayfield()
     end
 end
 
-local function drawTitleOverlay()
-    drawPanel(18, 10, 180, 78, 10)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawTextAligned("TOUCH DA", 108, 24, kTextAlignment.center)
-    gfx.drawTextAligned("FISHY", 108, 46, kTextAlignment.center)
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
-
-    drawPanel(220, 12, 162, 52, 8)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    gfx.drawText("MEME MODE", 248, 20)
-    gfx.drawText("CRANK TO BOOP", 234, 38)
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
-
-    drawPanel(76, 188, 248, 26, 8)
-    gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
-    if titlePulseFrames < 30 then
-        gfx.drawTextAligned("PRESS A TO START", 200, 195, kTextAlignment.center)
-    else
-        gfx.drawTextAligned("BOOP FISH WITH CRANK", 200, 195, kTextAlignment.center)
-    end
-    gfx.setImageDrawMode(gfx.kDrawModeCopy)
-
-    drawHalftoneDots(24, 58, 3)
-end
-
 local function drawTitleScreen()
     if titleBackground ~= nil then
         titleBackground:draw(0, 0)
     else
         gfx.clear(gfx.kColorWhite)
+        drawPanel(52, 58, 296, 100, 12)
+        gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
+        gfx.drawTextAligned("TOUCH DA FISHY", 200, 86, kTextAlignment.center)
+        gfx.drawTextAligned("PRESS A TO START", 200, 126, kTextAlignment.center)
+        gfx.setImageDrawMode(gfx.kDrawModeCopy)
     end
-
-    drawTitleOverlay()
     ui.crankIndicator:draw(344, 78)
 end
 
 local function drawGameOverScreen()
-    if titleBackground ~= nil then
-        titleBackground:draw(0, 0)
-        gfx.setColor(gfx.kColorWhite)
-        gfx.fillRect(0, 0, SCREEN_W, SCREEN_H)
-        gfx.setColor(gfx.kColorBlack)
-    end
-
+    gfx.clear(gfx.kColorWhite)
     drawPanel(52, 34, 296, 160, 12)
     gfx.setImageDrawMode(gfx.kDrawModeFillWhite)
     gfx.drawTextAligned("FISHY GOT AWAY", 200, 56, kTextAlignment.center)
@@ -613,4 +765,5 @@ function playdate.crankUndocked()
     showCrankHint(45)
 end
 
+initSound()
 loadHighScore()
