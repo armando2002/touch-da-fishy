@@ -1,0 +1,46 @@
+name: Build Touch Da Fishy
+
+# Run automatically on every push, and let you run it by hand from the Actions tab.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write   # needed so the build can be published to a Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Install the Playdate SDK
+        uses: pd-rs/get-playdate-sdk@0.4
+        with:
+          version: latest
+        # If this step ever fails because the action is out of date, swap the
+        # two lines above for:
+        #   uses: idleberg/setup-playdate-sdk@v3.0.0
+
+      - name: Compile the .pdx
+        # NOTE: this assumes "Source/" sits at the root of your repo (it does in
+        # the restart kit). If your game lives in a subfolder, change "Source"
+        # to that path, e.g.  pdc TouchDaFishy_meme_style/Source TouchDaFishy.pdx
+        run: |
+          pdc Source TouchDaFishy.pdx
+          zip -r -9 TouchDaFishy.zip TouchDaFishy.pdx
+
+      - name: Save the build as a downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TouchDaFishy
+          path: TouchDaFishy.zip
+
+      - name: Publish to the "latest" release (easy phone download link)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          files: TouchDaFishy.zip
